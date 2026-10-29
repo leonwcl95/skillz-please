@@ -2,7 +2,18 @@
 
 A Claude Code mod that pauses code-changing tool calls in a turn where no skill was used, and gives you a pane to switch installed plugins on or off. The plugin itself is called `skill-gate`; `skillz-please` is the repository and marketplace name.
 
-The idea: if a turn is about to edit files or run commands without going through any skill, stop and make that a visible, deliberate choice. Fewer enabled plugins also means fewer skill descriptions competing for context. The mod does not measure tokens; it only enforces the pause and makes plugin toggling quick.
+The idea: if a turn is about to edit files or run commands without going through any skill, stop and make that a visible, deliberate choice. It adds friction and a plugin switchboard.
+
+## Read this first: it does not save tokens
+
+The gate does not reduce token use, and in practice it usually increases it.
+
+- Each refusal adds the denial message to the conversation, and the model then retries.
+- The model is nudged toward invoking a skill, and invoking one loads that skill's full instructions into context. That can be thousands of tokens, and the model may load one only to get past the gate.
+- Turns that already use a skill are unaffected. The mod adds nothing to the system prompt, and the pane and animations are drawn locally with no model calls.
+- The one thing that can lower usage is switching plugins off in the pane: fewer enabled plugins means fewer skill descriptions in each request. That comes from the toggle, not the gate, and has not been measured.
+
+Use it if you want the pause and the switchboard, not as a token saver.
 
 ## What it does
 

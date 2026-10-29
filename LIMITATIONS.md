@@ -1,5 +1,14 @@
 # Limitations
 
+## Token cost
+
+The gate does not save tokens and usually costs some.
+
+- A refused call puts the denial text into the conversation, and the model retries afterwards.
+- Pushing the model toward a skill loads that skill's whole instructions into context, often thousands of tokens, even when the model only invokes one to get past the gate.
+- Turns that already use a skill are not affected. The mod adds nothing to the system prompt and does not break prompt caching.
+- Switching plugins off in the pane is the only part that can reduce usage, by removing their skill descriptions from each request. This has not been measured.
+
 ## What the gate cannot do
 
 - **Replies with no tools are not gated.** It only sees tool calls. A turn that just answers in text goes through, skill or not.
