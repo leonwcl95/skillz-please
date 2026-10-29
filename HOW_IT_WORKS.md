@@ -10,7 +10,7 @@ Everything lives in `hooks/register.tsx`. It is a hooks module: it registers han
 | `skill.prompt` | Sets the flag. Fires when a skill's prompt is expanded: `/name`, the Skill tool, or a preload. |
 | `tool.call` | If the tool is `Skill`, sets the flag. Otherwise, if the tool is one of `Edit`, `Write`, `NotebookEdit`, `Bash` and the flag is not set, returns a denial, records the tool name, and opens the pane. Every other tool passes through untouched. |
 
-The denial text tells the model to invoke a relevant skill first, or to ask you to press **Allow this turn**. Each denial is an extra tool result in the conversation and is usually followed by a retry, so it costs tokens rather than saving them; see [LIMITATIONS.md](LIMITATIONS.md).
+The call is held (the hook waits) until you press a pane button: **Allow this turn** or **Allow for this session** lets it run; **Deny** returns a denial to the model, which may retry, costing tokens; see [LIMITATIONS.md](LIMITATIONS.md). A new turn starting while a call is held denies it.
 
 The `tool.call` hook has a `.catch` that passes the call through. If the gate itself throws, work is not blocked.
 

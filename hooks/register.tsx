@@ -15,6 +15,7 @@ const plugins = atom({ plugin: 'skill-gate', key: 'plugins' } as const, [], { sh
 const blocked = atom({ plugin: 'skill-gate', key: 'blocked' } as const, null, { shape: 'blocked-1' })
 const frame = atom({ plugin: 'skill-gate', key: 'frame' } as const, REST, { shape: 'frame-1' })
 const flip = atom({ plugin: 'skill-gate', key: 'flip' } as const, null, { shape: 'flip-1' })
+const session = atom({ plugin: 'skill-gate', key: 'session' } as const, false, { shape: 'session-1' })
 
 let stop: (() => void) | undefined
 
@@ -73,6 +74,11 @@ async function show($: any) {
 export const register: Register = on => {
   // Per-turn: true once a skill ran, or the person pressed "Allow this turn".
   let isAllowed = false
+  // Per-session: set by "Allow for this session"; survives turns until revoked.
+  let isSession = false
+  // Tool calls parked until the person answers in the pane.
+  const waiting: Array<(d: 'allow' | 'deny') => void> = []
+  const release = (d: 'allow' | 'deny') => waiting.splice(0).forEach(r => r(d))
 
   on('session.start', async ($, e, next) => {
     await $.command.register({
@@ -88,7 +94,10 @@ export const register: Register = on => {
   })
 
   on('turn.start', ($, e, next) => {
-    if (e.agentId === undefined) isAllowed = false
+    if (e.agentId === undefined) {
+      isAllowed = false
+      release('deny') // a new turn means the parked call is stale
+    }
     return next(e)
   })
 
@@ -99,13 +108,16 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     if (e.tool === 'Skill') isAllowed = true
-    if (isAllowed || !GATED.has(e.tool)) return next(e)
+    if (isAllowed || isSession || !GATED.has(e.tool)) return next(e)
 
+    // Park the call: the turn really waits here until a pane button answers.
     await update($, blocked, () => e.tool)
     void show($)
-    return {
-      deny: 'skill-gate: no skill is in use this turn. Invoke a relevant skill first, or tell the user to press "Allow this turn" in the Skill gate pane.',
-    }
+    await $.ui.status('skill-gate: waiting for your approval in the Skill gate pane')
+    const d = await new Promise<'allow' | 'deny'>(res => waiting.push(res))
+    await $.ui.status(undefined)
+    if (d === 'allow') return next(e)
+    return { deny: 'skill-gate: the person declined this call. Invoke a relevant skill or ask them how to proceed.' }
   }).catch(($, e, next) => next(e)) // fail open: a broken gate must not stop work
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -114,6 +126,7 @@ export const register: Register = on => {
     const last = await read($, blocked)
     const f = await read($, frame)
     const fl = await read($, flip)
+    const isSess = await read($, session)
     const isMoving = f < REST
     const onCount = rows.filter(r => r.isOn).length
     const barWidth = 24
@@ -130,7 +143,7 @@ export const register: Register = on => {
             {isMoving ? SPARK[f % SPARK.length] : '✦'}{' '}
           </Text>
           <Text bold>Skill gate</Text>
-          <Text dimColor> · tokens saved by asking first</Text>
+          <Text dimColor> · asks before changing code without a skill</Text>
         </Box>
 
         {last !== null && (
@@ -138,16 +151,52 @@ export const register: Register = on => {
             <Text color="yellow" bold>
               Paused · {last}
             </Text>
-            <Text dimColor>No skill was used this turn.</Text>
+            <Text dimColor>No skill was used this turn. The turn is waiting for you.</Text>
             <Button
               key="allow"
               variant="primary"
               onPress={async () => {
                 isAllowed = true
                 await update($, blocked, () => null)
+                release('allow')
               }}
             >
               Allow this turn
+            </Button>
+            <Button
+              key="session"
+              onPress={async () => {
+                isSession = true
+                await update($, session, () => true)
+                await update($, blocked, () => null)
+                release('allow')
+              }}
+            >
+              Allow for this session
+            </Button>
+            <Button
+              key="deny"
+              onPress={async () => {
+                await update($, blocked, () => null)
+                release('deny')
+              }}
+            >
+              Deny
+            </Button>
+          </Box>
+        )}
+
+        {isSess && (
+          <Box borderStyle="round" borderColor="green" paddingX={1} flexDirection="column">
+            <Text color="green" bold>Allowed for this session</Text>
+            <Button
+              key="revoke"
+              onPress={async () => {
+                isSession = false
+                await update($, session, () => false)
+              }}
+            >
+              Turn the gate back on
             </Button>
           </Box>
         )}

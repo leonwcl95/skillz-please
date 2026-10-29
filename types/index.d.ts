@@ -9,6 +9,7 @@ declare module 'claude-code' {
       // Animation frame since the last play(); a large value means "at rest".
       frame: Shaped<number>
       flip: Shaped<Flip | null>
+      session: Shaped<boolean>
     }
   }
 }
