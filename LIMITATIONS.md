@@ -15,9 +15,18 @@ The gate does not save tokens and usually costs some.
 - **The gate checks for any skill**, not specifically a picked one.
 - **A starred plugin only helps if it has skills.** A plugin with only hooks, commands or agents gives the model nothing to invoke. Star state is not cleared when you switch the plugin off.
 - **The skill list hides only `built-in` skills.** Some bundled skills may still appear. It cannot tell skills you added by hand from other non-built-in ones.
-- **Lists show 12 rows.** Use the search box to reach the rest.
-- **Picks live for the session only**, and reset on a plugin reload.
+- **The Plugins tab shows 12 rows.** Use the search box to reach the rest.
+- **Profiles are saved across sessions**, but there is one global set: no per-project profiles.
+- **More than about 5 picks gets costly.** Every request carries the reminder; the pane only warns, it does not stop you.
+- **The skill list is rough before the first response.** It then includes plain plugin commands as well as skills, and it is exact once the first turn ends.
+- **Duplicate removal is a name rule.** A bare name is dropped if a `plugin:name` exists; two different skills sharing a name would be merged.
 - The skill name format `plugin:skill` and live typing in the search box have been checked by validation only.
+
+## Safe commands and held calls
+
+- **The safe-command list is a pattern match**, not a shell parser. It misses safe commands with parentheses, pipes or redirects (those stay gated), and it trusts that the listed commands are read-only.
+- **A held call is denied after 2 minutes** without an answer. The model is told, and may retry.
+- **A toast is the only alert** for a held call; there is no sound.
 
 ## What the gate cannot do
 
@@ -41,6 +50,8 @@ The gate does not save tokens and usually costs some.
 - How the pane looks in every surface (terminal, desktop, VS Code). The glyphs `◐ ● ○ ✦ █ ░` can render as boxes in some fonts.
 - Animation smoothness at the 50 ms frame rate in the desktop app.
 - Install and update from a marketplace beyond the owner's check that version 0.1.0 installed from GitHub. Updating from an older version needs the version number in `plugin.json` to change.
+- Profiles, grouping, the safe-command list, the timeout, saving across restarts, and the spacing of the pane: validated by `claude plugin validate` only, not exercised in a live session.
+- That the Bash tool's command is read from the field the safe-command check uses. If it is not, the check never matches and nothing else changes.
 - A held call when the pane has been closed: the turn stays waiting until the pane is reopened and a button pressed.
 
 ## Not included

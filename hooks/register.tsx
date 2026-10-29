@@ -1,29 +1,39 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { Flip, PluginRow } from '../types'
+import type { Flip, PluginRow, Profile } from '../types'
 
 const PANE = 'skill-gate'
 const GATED = new Set(['Edit', 'Write', 'NotebookEdit', 'Bash'])
 const REST = 999
-const MAX = 12 // rows per list; search narrows the rest
-const TICK = 50 // ms per frame: stagger and glyph steps stay in the 30-80ms range
+const MAX = 12 // plugin rows shown; search narrows the rest
+const SOFT_CAP = 5 // picks beyond this make every request's reminder noticeably longer
+const HOLD_MS = 120_000 // a held call is denied after this long unanswered
+const TICK = 50 // ms per frame: glyph steps stay in the 30-80ms range
 const SPARK = ['✦', '✧', '⋆', '✧']
 const TO_ON = ['○', '◐', '●']
 const TO_OFF = ['●', '◐', '○']
+// One read-only command, no chaining, no redirects, no `--output` file writes.
+// shortcut: a regex, not a shell parser; paths with parentheses are not matched, widen when it annoys.
+const SAFE = /^\s*(ls|pwd|cat|head|tail|wc|grep|rg|git\s+(status|log|diff|show|branch))\b(?!.*--output)[^;&|><`$()\n]*$/
+const EMPTY: Profile = { skills: [], plugins: [] }
 
 const plugins = atom({ plugin: 'skill-gate', key: 'plugins' } as const, [], { shape: 'plugins-1' })
 const blocked = atom({ plugin: 'skill-gate', key: 'blocked' } as const, null, { shape: 'blocked-1' })
 const frame = atom({ plugin: 'skill-gate', key: 'frame' } as const, REST, { shape: 'frame-1' })
 const flip = atom({ plugin: 'skill-gate', key: 'flip' } as const, null, { shape: 'flip-1' })
 const skills = atom({ plugin: 'skill-gate', key: 'skills' } as const, [], { shape: 'skills-1' })
-const picked = atom({ plugin: 'skill-gate', key: 'picked' } as const, [], { shape: 'picked-1' })
-const pickedPlugins = atom({ plugin: 'skill-gate', key: 'pickedPlugins' } as const, [], { shape: 'pickedPlugins-1' })
+const profiles = atom({ plugin: 'skill-gate', key: 'profiles' } as const, { Default: EMPTY }, { shape: 'profiles-1' })
+const active = atom({ plugin: 'skill-gate', key: 'active' } as const, 'Default', { shape: 'active-1' })
+const openGroups = atom({ plugin: 'skill-gate', key: 'openGroups' } as const, [], { shape: 'openGroups-1' })
+const newName = atom({ plugin: 'skill-gate', key: 'newName' } as const, '', { shape: 'newName-1' })
 const query = atom({ plugin: 'skill-gate', key: 'query' } as const, '', { shape: 'query-1' })
 const tabAtom = atom({ plugin: 'skill-gate', key: 'tab' } as const, 'plugins', { shape: 'tab-1' })
 const session = atom({ plugin: 'skill-gate', key: 'session' } as const, false, { shape: 'session-1' })
 
 let stop: (() => void) | undefined
+
+const flipIn = (list: string[], v: string) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v])
 
 // Runs `frames` ticks from 0 then rests: the timer only lives during a burst, so an idle pane never redraws.
 async function play($: any, frames: number) {
@@ -60,11 +70,67 @@ async function load($: any) {
 }
 
 // Names the Skill tool accepts: `plugin:skill` for plugin skills, the bare name otherwise.
+// A bare name that also exists as `plugin:name` is the same skill listed twice, so it is dropped.
 async function loadSkills($: any) {
   const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => undefined)
   const list: any[] = usage?.context?.breakdown?.skills?.skillFrontmatter ?? []
-  const names = list.filter(s => s.source !== 'built-in').map(s => (s.pluginName && !s.name.includes(':') ? `${s.pluginName}:${s.name}` : s.name))
-  await update($, skills, () => [...new Set<string>(names)].sort())
+  let names: string[] = list
+    .filter(s => s.source !== 'built-in')
+    .map(s => (s.pluginName && !s.name.includes(':') ? `${s.pluginName}:${s.name}` : s.name))
+  // The /context breakdown does not exist before the first response. Slash commands do, and a plugin's
+  // skills are among them (so are its plain commands: shortcut, the list is rough until the first turn ends).
+  if (names.length === 0) {
+    const cmds: any[] = await $.command.list().catch(() => [])
+    names = cmds.filter(c => c.source === 'plugin' || c.source === 'user').map(c => c.name)
+  }
+  const unique = [...new Set(names)].filter(n => n.includes(':') || !names.some(m => m.endsWith(`:${n}`)))
+  await update($, skills, () => unique.sort())
+}
+
+// Profiles live across sessions in the mod's store.
+async function saveProfiles($: any) {
+  await $.store.set('profiles', { profiles: await read($, profiles), active: await read($, active) })
+}
+
+async function loadProfiles($: any) {
+  const saved = (await $.store.get('profiles').catch(() => undefined)) as
+    | { profiles: Record<string, Profile>; active: string }
+    | undefined
+  if (!saved || Object.keys(saved.profiles).length === 0) return
+  await update($, profiles, () => saved.profiles)
+  await update($, active, () => (saved.profiles[saved.active] ? saved.active : Object.keys(saved.profiles)[0]))
+}
+
+async function current($: any): Promise<Profile> {
+  return (await read($, profiles))[await read($, active)] ?? EMPTY
+}
+
+// Change the active profile's picks and save.
+async function edit($: any, fn: (p: Profile) => Profile) {
+  const name = await read($, active)
+  await update($, profiles, (ps: Record<string, Profile>) => ({ ...ps, [name]: fn(ps[name] ?? EMPTY) }))
+  await saveProfiles($)
+}
+
+async function switchTo($: any, name: string) {
+  await update($, active, () => name)
+  await saveProfiles($)
+}
+
+async function addProfile($: any, raw: string) {
+  const name = raw.trim()
+  if (name === '') return
+  await update($, profiles, (ps: Record<string, Profile>) => (ps[name] ? ps : { ...ps, [name]: EMPTY }))
+  await update($, newName, () => '')
+  await switchTo($, name)
+}
+
+async function dropProfile($: any) {
+  const name = await read($, active)
+  const rest = Object.fromEntries(Object.entries(await read($, profiles)).filter(([k]) => k !== name))
+  if (Object.keys(rest).length === 0) return // always keep one
+  await update($, profiles, () => rest)
+  await switchTo($, Object.keys(rest)[0])
 }
 
 async function toggle($: any, id: string) {
@@ -96,6 +162,7 @@ export const register: Register = on => {
   const release = (d: 'allow' | 'deny') => waiting.splice(0).forEach(r => r(d))
 
   on('session.start', async ($, e, next) => {
+    await loadProfiles($)
     await $.command.register({
       name: 'skill-gate',
       description: 'Show installed plugins and toggle them on or off',
@@ -108,17 +175,15 @@ export const register: Register = on => {
     return { text: 'Skill gate pane opened.' }
   })
 
-  // Tell the model about the chosen skills in every request of the session.
+  // Tell the model about the active profile's skills and plugins in every request of the session.
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
-    const names = await read($, picked)
-    const favs = await read($, pickedPlugins)
-    if (names.length === 0 && favs.length === 0) return r
+    const p = await current($)
+    if (p.skills.length === 0 && p.plugins.length === 0) return r
     const parts = []
-    if (names.length > 0) parts.push(`The person chose these skills for this session: ${names.join(', ')}. Invoke the relevant one with the Skill tool before you change code or run commands, every turn, without being asked.`)
-    if (favs.length > 0) parts.push(`The person chose these plugins to always prefer: ${favs.join(', ')}. When one of their skills fits the task, invoke it with the Skill tool.`)
-    const text = parts.join(' ')
-    return { sections: [...r.sections, { id: 'skill-gate:picked', text, scope: 'session' as const }] }
+    if (p.skills.length > 0) parts.push(`The person chose these skills for this session: ${p.skills.join(', ')}. Invoke the relevant one with the Skill tool before you change code or run commands, every turn, without being asked.`)
+    if (p.plugins.length > 0) parts.push(`The person chose these plugins to always prefer: ${p.plugins.join(', ')}. When one of their skills fits the task, invoke it with the Skill tool.`)
+    return { sections: [...r.sections, { id: 'skill-gate:picked', text: parts.join(' '), scope: 'session' as const }] }
   }).catch(($, e, next) => next(e))
 
   on('turn.start', ($, e, next) => {
@@ -129,6 +194,12 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // Swap the rough pre-first-turn list for the exact one as soon as a response exists.
+  on('turn.complete', async ($, e, next) => {
+    await loadSkills($)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('skill.prompt', ($, e, next) => {
     isAllowed = true
     return next(e)
@@ -137,21 +208,36 @@ export const register: Register = on => {
   on('tool.call', async ($, e, next) => {
     if (e.tool === 'Skill') isAllowed = true
     if (isAllowed || isSession || !GATED.has(e.tool)) return next(e)
+    if (e.tool === 'Bash' && SAFE.test(String((e as any).command ?? ''))) return next(e)
 
-    // Chosen skills mean approval is implied: tell the model which to use and let it retry.
-    const chosen = [...(await read($, picked)), ...(await read($, pickedPlugins)).map(p => `a ${p} skill`)]
+    // Picked skills mean approval is implied: tell the model which to use and let it retry.
+    const p = await current($)
+    const chosen = [...p.skills, ...p.plugins.map(n => `a ${n} skill`)]
     if (chosen.length > 0) {
       return { deny: `skill-gate: invoke one of the skills the person chose (${chosen.join(', ')}) with the Skill tool, then retry.` }
     }
 
-    // Park the call: the turn really waits here until a pane button answers.
+    // Park the call: the turn really waits here until a pane button answers, or the hold times out.
     await update($, blocked, () => e.tool)
     void show($)
+    $.ui.toast('skill-gate: a call is waiting for your answer')
     await $.ui.status('skill-gate: waiting for your approval in the Skill gate pane')
-    const d = await new Promise<'allow' | 'deny'>(res => waiting.push(res))
+    let timedOut = false
+    const d = await Promise.race([
+      new Promise<'allow' | 'deny'>(res => waiting.push(res)),
+      $.clock.sleep(HOLD_MS).then(() => {
+        timedOut = true
+        return 'deny' as const
+      }),
+    ])
     await $.ui.status(undefined)
+    await update($, blocked, () => null)
     if (d === 'allow') return next(e)
-    return { deny: 'skill-gate: the person declined this call. Invoke a relevant skill or ask them how to proceed.' }
+    return {
+      deny: timedOut
+        ? 'skill-gate: no answer from the person in 2 minutes. Invoke a relevant skill or ask them how to proceed.'
+        : 'skill-gate: the person declined this call. Invoke a relevant skill or ask them how to proceed.',
+    }
   }).catch(($, e, next) => next(e)) // fail open: a broken gate must not stop work
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
@@ -162,37 +248,47 @@ export const register: Register = on => {
     const fl = await read($, flip)
     const isSess = await read($, session)
     const all = await read($, skills)
-    const chosen = await read($, picked)
-    const favs = await read($, pickedPlugins)
+    const profs = await read($, profiles)
+    const act = await read($, active)
+    const open = await read($, openGroups)
+    const name = await read($, newName)
     const q = await read($, query)
     const tab = await read($, tabAtom)
+    const prof = profs[act] ?? EMPTY
+    const picks = prof.skills.length + prof.plugins.length
     const isMoving = f < REST
     const onCount = rows.filter(r => r.isOn).length
     // The border blinks yellow twice when a call is blocked, then stays steady.
     const warn = !isMoving || f % 4 < 2 ? 'yellow' : undefined
     const needle = q.trim().toLowerCase()
     const match = (s: string) => needle === '' || s.toLowerCase().includes(needle)
-    const flipIn = (list: string[], v: string) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v])
-    const toggleSkill = (v: string) => update($, picked, (l: string[]) => flipIn(l, v))
-    const togglePlugin = (v: string) => update($, pickedPlugins, (l: string[]) => flipIn(l, v))
+    const toggleSkill = (v: string) => edit($, p => ({ ...p, skills: flipIn(p.skills, v) }))
+    const togglePlugin = (v: string) => edit($, p => ({ ...p, plugins: flipIn(p.plugins, v) }))
+    const toggleGroup = (g: string) => update($, openGroups, (l: string[]) => flipIn(l, g))
     const pickTab = async (t: string) => {
       await update($, tabAtom, () => t)
       await update($, query, () => '')
     }
 
     const plugRows = rows.filter(r => match(r.id))
-    const skillRows = all.filter(match).sort((a, b) => Number(chosen.includes(b)) - Number(chosen.includes(a)))
-    const count = tab === 'plugins' ? plugRows.length : skillRows.length
-    const hidden = Math.max(0, count - MAX)
+    const hidden = Math.max(0, plugRows.length - MAX)
+    // Skills grouped by their plugin; no colon means one of your own.
+    const groups = new Map<string, string[]>()
+    for (const s of all.filter(match)) {
+      const g = s.includes(':') ? s.split(':')[0] : '(own)'
+      groups.set(g, [...(groups.get(g) ?? []), s])
+    }
+    const groupList = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
 
     const gate = isSess
       ? { color: 'green', text: 'gate open for this session' }
-      : chosen.length + favs.length > 0
-        ? { color: 'cyan', text: 'gate on: needs a skill, reminds me of your picks' }
+      : picks > 0
+        ? { color: 'cyan', text: `gate on: needs a skill, reminds me of ${act}` }
         : { color: 'yellow', text: 'gate on: asks you before code changes' }
+    const preview = [...prof.plugins.map(p => `★ ${p}`), ...prof.skills.map(s => `✓ ${s}`)]
 
     return (
-      <Box flexDirection="column" gap={1} paddingX={1}>
+      <Box flexDirection="column" gap={1} paddingX={2} paddingY={1}>
         <Box flexDirection="column">
           <Box>
             <Text color="magenta" bold>
@@ -204,7 +300,7 @@ export const register: Register = on => {
         </Box>
 
         {last !== null && (
-          <Box borderStyle="round" borderColor={warn} paddingX={1} flexDirection="column">
+          <Box borderStyle="round" borderColor={warn} paddingX={2} paddingY={1} gap={1} flexDirection="column">
             <Text color="yellow" bold>
               Paused · {last}
             </Text>
@@ -255,24 +351,52 @@ export const register: Register = on => {
           </Button>
         )}
 
-        <Box borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column">
-          <Text bold>Always use</Text>
-          {chosen.length + favs.length === 0 ? (
-            <Text dimColor>Nothing picked. Tick a skill or star a plugin below.</Text>
+        <Box borderStyle="round" borderColor="cyan" paddingX={2} paddingY={1} gap={1} flexDirection="column">
+          <Text bold>Profile</Text>
+          <Box gap={1}>
+            {Object.keys(profs).map(n => (
+              <Button key={`p-${n}`} variant={n === act ? 'primary' : undefined} onPress={() => switchTo($, n)}>
+                {n}
+              </Button>
+            ))}
+          </Box>
+          <Box>
+            <Input
+              key="new"
+              label="New profile "
+              placeholder="name, then Enter"
+              value={name}
+              onInput={(v: string) => update($, newName, () => v)}
+              onSubmit={(v: string) => addProfile($, v)}
+            />
+            {Object.keys(profs).length > 1 && (
+              <Button key="drop" onPress={() => dropProfile($)}>
+                Delete {act}
+              </Button>
+            )}
+          </Box>
+          {picks === 0 ? (
+            <Text dimColor>Nothing picked. Open the Skills tab to tick skills, star plugins on the Plugins tab.</Text>
           ) : (
             <Text>
-              {[...favs.map(p => `★ ${p}`), ...chosen.map(s => `■ ${s}`)].join('  ')}
+              {preview.slice(0, 4).join('  ')}
+              {preview.length > 4 ? `  +${preview.length - 4} more` : ''}
+            </Text>
+          )}
+          {picks > SOFT_CAP && (
+            <Text color="yellow">
+              {picks} picks: every request now carries a longer reminder. Fewer is cheaper.
             </Text>
           )}
         </Box>
 
-        <Box borderStyle="round" borderColor="magenta" paddingX={1} flexDirection="column">
+        <Box borderStyle="round" borderColor="magenta" paddingX={2} paddingY={1} gap={1} flexDirection="column">
           <Box gap={2}>
             <Button key="t-plugins" variant={tab === 'plugins' ? 'primary' : undefined} onPress={() => pickTab('plugins')}>
               Plugins {onCount} on · {rows.length - onCount} off
             </Button>
             <Button key="t-skills" variant={tab === 'skills' ? 'primary' : undefined} onPress={() => pickTab('skills')}>
-              Skills {chosen.length} picked · {all.length}
+              Skills {prof.skills.length} picked · {all.length}
             </Button>
           </Box>
           <Input
@@ -284,15 +408,16 @@ export const register: Register = on => {
             onSubmit={() => {}}
           />
 
-          {tab === 'plugins' &&
-            plugRows.slice(0, MAX).map(r => {
-              const [name, market] = r.id.split('@')
+          {tab === 'plugins' && (
+            <Box flexDirection="column" gap={1}>
+            {plugRows.slice(0, MAX).map(r => {
+              const [pname, market] = r.id.split('@')
               const isFlipping = fl?.id === r.id && f < TO_ON.length
               const glyph = isFlipping ? (fl.to ? TO_ON : TO_OFF)[f] : r.isOn ? '●' : '○'
-              const isFav = favs.includes(name)
+              const isFav = prof.plugins.includes(pname)
               return (
                 <Box key={r.id}>
-                  <Button key="fav" onPress={() => togglePlugin(name)}>
+                  <Button key="fav" onPress={() => togglePlugin(pname)}>
                     <Text color={isFav ? 'cyan' : undefined} dimColor={!isFav}>
                       {isFav ? '★' : '☆'}{' '}
                     </Text>
@@ -302,31 +427,53 @@ export const register: Register = on => {
                       {glyph} {r.isOn ? 'ON ' : 'OFF'}{' '}
                     </Text>
                     <Text bold={r.isOn} dimColor={!r.isOn}>
-                      {name}
+                      {pname}
                     </Text>
-                    {market !== undefined && <Text dimColor> {market}</Text>}
+                    {market !== undefined && pname !== market && <Text dimColor> {market}</Text>}
                   </Button>
                 </Box>
               )
             })}
+            </Box>
+          )}
 
-          {tab === 'skills' &&
-            skillRows.slice(0, MAX).map(s => (
-              <Button key={s} onPress={() => toggleSkill(s)}>
-                <Text color={chosen.includes(s) ? 'cyan' : undefined} dimColor={!chosen.includes(s)}>
-                  {chosen.includes(s) ? '■' : '□'} {s}
-                </Text>
-              </Button>
-            ))}
+          {tab === 'skills' && (
+            <Box flexDirection="column" gap={1}>
+            {groupList.map(([g, list]) => {
+              const isOpen = needle !== '' || open.includes(g)
+              const picked = list.filter(s => prof.skills.includes(s)).length
+              return (
+                <Box key={g} flexDirection="column">
+                  <Button key="head" onPress={() => toggleGroup(g)}>
+                    <Text bold>{isOpen ? '▾' : '▸'} {g}</Text>
+                    <Text dimColor> {list.length}</Text>
+                    {picked > 0 && <Text color="cyan"> · {picked} picked</Text>}
+                  </Button>
+                  {isOpen &&
+                    list.map(s => {
+                      const isPicked = prof.skills.includes(s)
+                      return (
+                        <Button key={s} onPress={() => toggleSkill(s)}>
+                          <Text color={isPicked ? 'cyan' : undefined} dimColor={!isPicked}>
+                            {'   '}{isPicked ? '✓' : '·'} {s.includes(':') ? s.slice(s.indexOf(':') + 1) : s}
+                          </Text>
+                        </Button>
+                      )
+                    })}
+                </Box>
+              )
+            })}
+            </Box>
+          )}
 
-          {count === 0 && <Text dimColor>No match.</Text>}
-          {hidden > 0 && <Text dimColor>+{hidden} more · type to narrow</Text>}
+          {(tab === 'plugins' ? plugRows.length : groupList.length) === 0 && <Text dimColor>No match.</Text>}
+          {tab === 'plugins' && hidden > 0 && <Text dimColor>+{hidden} more · type to narrow</Text>}
         </Box>
 
         <Text dimColor>
           {tab === 'plugins'
-            ? '★ always prefer · ● ON / ○ OFF, click to switch (applies after /reload-plugins)'
-            : '□ → ■ click to always use · unpicked skills stay automatic'}
+            ? '★ always prefer · click ON/OFF to switch (applies after /reload-plugins)'
+            : '▸ open a plugin, click a skill to pick · unpicked skills stay automatic'}
         </Text>
       </Box>
     )

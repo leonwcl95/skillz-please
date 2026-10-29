@@ -1,1 +1,1 @@
-{ "name": "skill-gate", "version": "0.3.0", "description": "Blocks code-changing tool calls in a turn that uses no skill, and opens a pane to toggle installed plugins.", "types": "./types/index.d.ts" }
+{ "name": "skill-gate", "version": "0.4.0", "description": "Blocks code-changing tool calls in a turn that uses no skill, and opens a pane to toggle installed plugins.", "types": "./types/index.d.ts" }
