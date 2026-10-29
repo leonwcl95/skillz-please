@@ -6,6 +6,7 @@ import type { Flip, PluginRow } from '../types'
 const PANE = 'skill-gate'
 const GATED = new Set(['Edit', 'Write', 'NotebookEdit', 'Bash'])
 const REST = 999
+const MAX = 12 // rows per list; search narrows the rest
 const TICK = 50 // ms per frame: stagger and glyph steps stay in the 30-80ms range
 const SPARK = ['✦', '✧', '⋆', '✧']
 const TO_ON = ['○', '◐', '●']
@@ -15,6 +16,11 @@ const plugins = atom({ plugin: 'skill-gate', key: 'plugins' } as const, [], { sh
 const blocked = atom({ plugin: 'skill-gate', key: 'blocked' } as const, null, { shape: 'blocked-1' })
 const frame = atom({ plugin: 'skill-gate', key: 'frame' } as const, REST, { shape: 'frame-1' })
 const flip = atom({ plugin: 'skill-gate', key: 'flip' } as const, null, { shape: 'flip-1' })
+const skills = atom({ plugin: 'skill-gate', key: 'skills' } as const, [], { shape: 'skills-1' })
+const picked = atom({ plugin: 'skill-gate', key: 'picked' } as const, [], { shape: 'picked-1' })
+const pickedPlugins = atom({ plugin: 'skill-gate', key: 'pickedPlugins' } as const, [], { shape: 'pickedPlugins-1' })
+const query = atom({ plugin: 'skill-gate', key: 'query' } as const, '', { shape: 'query-1' })
+const tabAtom = atom({ plugin: 'skill-gate', key: 'tab' } as const, 'plugins', { shape: 'tab-1' })
 const session = atom({ plugin: 'skill-gate', key: 'session' } as const, false, { shape: 'session-1' })
 
 let stop: (() => void) | undefined
@@ -53,6 +59,14 @@ async function load($: any) {
   await update($, plugins, () => rows)
 }
 
+// Names the Skill tool accepts: `plugin:skill` for plugin skills, the bare name otherwise.
+async function loadSkills($: any) {
+  const usage = await $.session.usage({ breakdown: 'summary' }).catch(() => undefined)
+  const list: any[] = usage?.context?.breakdown?.skills?.skillFrontmatter ?? []
+  const names = list.filter(s => s.source !== 'built-in').map(s => (s.pluginName && !s.name.includes(':') ? `${s.pluginName}:${s.name}` : s.name))
+  await update($, skills, () => [...new Set<string>(names)].sort())
+}
+
 async function toggle($: any, id: string) {
   const file = await settingsPath($)
   const json = JSON.parse(await $.fs.read(file).catch(() => '{}'))
@@ -67,6 +81,7 @@ async function toggle($: any, id: string) {
 
 async function show($: any) {
   await load($)
+  await loadSkills($)
   await $.ui.open({ id: PANE, title: 'Skill gate' })
   await play($, 14)
 }
@@ -93,6 +108,19 @@ export const register: Register = on => {
     return { text: 'Skill gate pane opened.' }
   })
 
+  // Tell the model about the chosen skills in every request of the session.
+  on('prompt.compose', async ($, e, next) => {
+    const r = await next(e)
+    const names = await read($, picked)
+    const favs = await read($, pickedPlugins)
+    if (names.length === 0 && favs.length === 0) return r
+    const parts = []
+    if (names.length > 0) parts.push(`The person chose these skills for this session: ${names.join(', ')}. Invoke the relevant one with the Skill tool before you change code or run commands, every turn, without being asked.`)
+    if (favs.length > 0) parts.push(`The person chose these plugins to always prefer: ${favs.join(', ')}. When one of their skills fits the task, invoke it with the Skill tool.`)
+    const text = parts.join(' ')
+    return { sections: [...r.sections, { id: 'skill-gate:picked', text, scope: 'session' as const }] }
+  }).catch(($, e, next) => next(e))
+
   on('turn.start', ($, e, next) => {
     if (e.agentId === undefined) {
       isAllowed = false
@@ -110,6 +138,12 @@ export const register: Register = on => {
     if (e.tool === 'Skill') isAllowed = true
     if (isAllowed || isSession || !GATED.has(e.tool)) return next(e)
 
+    // Chosen skills mean approval is implied: tell the model which to use and let it retry.
+    const chosen = [...(await read($, picked)), ...(await read($, pickedPlugins)).map(p => `a ${p} skill`)]
+    if (chosen.length > 0) {
+      return { deny: `skill-gate: invoke one of the skills the person chose (${chosen.join(', ')}) with the Skill tool, then retry.` }
+    }
+
     // Park the call: the turn really waits here until a pane button answers.
     await update($, blocked, () => e.tool)
     void show($)
@@ -121,29 +155,52 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e)) // fail open: a broken gate must not stop work
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const { Box, Text, Button, Input } = $.ui.resolve(e)
     const rows = await read($, plugins)
     const last = await read($, blocked)
     const f = await read($, frame)
     const fl = await read($, flip)
     const isSess = await read($, session)
+    const all = await read($, skills)
+    const chosen = await read($, picked)
+    const favs = await read($, pickedPlugins)
+    const q = await read($, query)
+    const tab = await read($, tabAtom)
     const isMoving = f < REST
     const onCount = rows.filter(r => r.isOn).length
-    const barWidth = 24
-    const filled = rows.length === 0 ? 0 : Math.round((onCount / rows.length) * barWidth)
-    // The bar grows into place during the entrance (ease-out: big steps first).
-    const grow = isMoving ? Math.min(filled, Math.round(filled * (1 - (1 - Math.min(f / 8, 1)) ** 2))) : filled
     // The border blinks yellow twice when a call is blocked, then stays steady.
     const warn = !isMoving || f % 4 < 2 ? 'yellow' : undefined
+    const needle = q.trim().toLowerCase()
+    const match = (s: string) => needle === '' || s.toLowerCase().includes(needle)
+    const flipIn = (list: string[], v: string) => (list.includes(v) ? list.filter(x => x !== v) : [...list, v])
+    const toggleSkill = (v: string) => update($, picked, (l: string[]) => flipIn(l, v))
+    const togglePlugin = (v: string) => update($, pickedPlugins, (l: string[]) => flipIn(l, v))
+    const pickTab = async (t: string) => {
+      await update($, tabAtom, () => t)
+      await update($, query, () => '')
+    }
+
+    const plugRows = rows.filter(r => match(r.id))
+    const skillRows = all.filter(match).sort((a, b) => Number(chosen.includes(b)) - Number(chosen.includes(a)))
+    const count = tab === 'plugins' ? plugRows.length : skillRows.length
+    const hidden = Math.max(0, count - MAX)
+
+    const gate = isSess
+      ? { color: 'green', text: 'gate open for this session' }
+      : chosen.length + favs.length > 0
+        ? { color: 'cyan', text: 'gate on: needs a skill, reminds me of your picks' }
+        : { color: 'yellow', text: 'gate on: asks you before code changes' }
 
     return (
       <Box flexDirection="column" gap={1} paddingX={1}>
-        <Box>
-          <Text color="magenta" bold>
-            {isMoving ? SPARK[f % SPARK.length] : '✦'}{' '}
-          </Text>
-          <Text bold>Skill gate</Text>
-          <Text dimColor> · asks before changing code without a skill</Text>
+        <Box flexDirection="column">
+          <Box>
+            <Text color="magenta" bold>
+              {isMoving ? SPARK[f % SPARK.length] : '✦'}{' '}
+            </Text>
+            <Text bold>Skill gate</Text>
+          </Box>
+          <Text color={gate.color}>● {gate.text}</Text>
         </Box>
 
         {last !== null && (
@@ -187,51 +244,90 @@ export const register: Register = on => {
         )}
 
         {isSess && (
-          <Box borderStyle="round" borderColor="green" paddingX={1} flexDirection="column">
-            <Text color="green" bold>Allowed for this session</Text>
-            <Button
-              key="revoke"
-              onPress={async () => {
-                isSession = false
-                await update($, session, () => false)
-              }}
-            >
-              Turn the gate back on
-            </Button>
-          </Box>
+          <Button
+            key="revoke"
+            onPress={async () => {
+              isSession = false
+              await update($, session, () => false)
+            }}
+          >
+            Turn the gate back on
+          </Button>
         )}
 
-        <Box borderStyle="round" borderColor="magenta" paddingX={1} flexDirection="column">
-          <Box>
-            <Text bold>Plugins </Text>
-            <Text color="green">{'█'.repeat(grow)}</Text>
-            <Text dimColor>{'░'.repeat(barWidth - grow)}</Text>
-            <Text dimColor>
-              {' '}
-              {onCount}/{rows.length}
+        <Box borderStyle="round" borderColor="cyan" paddingX={1} flexDirection="column">
+          <Text bold>Always use</Text>
+          {chosen.length + favs.length === 0 ? (
+            <Text dimColor>Nothing picked. Tick a skill or star a plugin below.</Text>
+          ) : (
+            <Text>
+              {[...favs.map(p => `★ ${p}`), ...chosen.map(s => `■ ${s}`)].join('  ')}
             </Text>
-          </Box>
-          {rows.map((r, i) => {
-            const [name, market] = r.id.split('@')
-            const isFlipping = fl?.id === r.id && f < TO_ON.length * 1
-            const glyph = isFlipping ? (fl.to ? TO_ON : TO_OFF)[f] : r.isOn ? '●' : '○'
-            // Stagger: row i fades in one frame after row i-1 (dim, then full).
-            if (isMoving && fl === null && f < i) return <Text key={r.id} dimColor>·</Text>
-            const isFresh = isMoving && fl === null && f === i
-            return (
-              <Button key={r.id} onPress={() => toggle($, r.id)}>
-                <Text color={r.isOn ? 'green' : undefined} dimColor={!r.isOn || isFresh}>
-                  {glyph}{' '}
-                </Text>
-                <Text bold={r.isOn} dimColor={!r.isOn || isFresh}>
-                  {name}
-                </Text>
-                {market !== undefined && <Text dimColor> {market}</Text>}
-              </Button>
-            )
-          })}
+          )}
         </Box>
-        <Text dimColor>Click a plugin to toggle · applies after /reload-plugins</Text>
+
+        <Box borderStyle="round" borderColor="magenta" paddingX={1} flexDirection="column">
+          <Box gap={2}>
+            <Button key="t-plugins" variant={tab === 'plugins' ? 'primary' : undefined} onPress={() => pickTab('plugins')}>
+              Plugins {onCount} on · {rows.length - onCount} off
+            </Button>
+            <Button key="t-skills" variant={tab === 'skills' ? 'primary' : undefined} onPress={() => pickTab('skills')}>
+              Skills {chosen.length} picked · {all.length}
+            </Button>
+          </Box>
+          <Input
+            key="search"
+            label="Search "
+            placeholder={tab === 'plugins' ? 'filter plugins' : 'filter skills'}
+            value={q}
+            onInput={(v: string) => update($, query, () => v)}
+            onSubmit={() => {}}
+          />
+
+          {tab === 'plugins' &&
+            plugRows.slice(0, MAX).map(r => {
+              const [name, market] = r.id.split('@')
+              const isFlipping = fl?.id === r.id && f < TO_ON.length
+              const glyph = isFlipping ? (fl.to ? TO_ON : TO_OFF)[f] : r.isOn ? '●' : '○'
+              const isFav = favs.includes(name)
+              return (
+                <Box key={r.id}>
+                  <Button key="fav" onPress={() => togglePlugin(name)}>
+                    <Text color={isFav ? 'cyan' : undefined} dimColor={!isFav}>
+                      {isFav ? '★' : '☆'}{' '}
+                    </Text>
+                  </Button>
+                  <Button key="on" onPress={() => toggle($, r.id)}>
+                    <Text color={r.isOn ? 'green' : 'red'} bold>
+                      {glyph} {r.isOn ? 'ON ' : 'OFF'}{' '}
+                    </Text>
+                    <Text bold={r.isOn} dimColor={!r.isOn}>
+                      {name}
+                    </Text>
+                    {market !== undefined && <Text dimColor> {market}</Text>}
+                  </Button>
+                </Box>
+              )
+            })}
+
+          {tab === 'skills' &&
+            skillRows.slice(0, MAX).map(s => (
+              <Button key={s} onPress={() => toggleSkill(s)}>
+                <Text color={chosen.includes(s) ? 'cyan' : undefined} dimColor={!chosen.includes(s)}>
+                  {chosen.includes(s) ? '■' : '□'} {s}
+                </Text>
+              </Button>
+            ))}
+
+          {count === 0 && <Text dimColor>No match.</Text>}
+          {hidden > 0 && <Text dimColor>+{hidden} more · type to narrow</Text>}
+        </Box>
+
+        <Text dimColor>
+          {tab === 'plugins'
+            ? '★ always prefer · ● ON / ○ OFF, click to switch (applies after /reload-plugins)'
+            : '□ → ■ click to always use · unpicked skills stay automatic'}
+        </Text>
       </Box>
     )
   })

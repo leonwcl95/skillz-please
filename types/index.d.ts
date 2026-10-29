@@ -10,6 +10,11 @@ declare module 'claude-code' {
       frame: Shaped<number>
       flip: Shaped<Flip | null>
       session: Shaped<boolean>
+      skills: Shaped<string[]>
+      picked: Shaped<string[]>
+      pickedPlugins: Shaped<string[]>
+      query: Shaped<string>
+      tab: Shaped<string>
     }
   }
 }
