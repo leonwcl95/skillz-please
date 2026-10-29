@@ -1,0 +1,5 @@
+{
+  "name": "skillz-please",
+  "owner": { "name": "leonwcl95" },
+  "plugins": [{ "name": "skill-gate", "source": "./" }]
+}
