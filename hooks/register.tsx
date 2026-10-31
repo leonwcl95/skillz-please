@@ -18,6 +18,56 @@ const TO_OFF = ['●', '◐', '○']
 const SAFE = /^\s*(ls|pwd|cat|head|tail|wc|grep|rg|git\s+(status|log|diff|show|branch))\b(?!.*--output)[^;&|><`$()\n]*$/
 const EMPTY: Profile = { skills: [], plugins: [] }
 
+export type Mode = 'advise' | 'gate'
+
+// A starred plugin already covers all of its skills, so a pick inside one adds nothing.
+export function effective(p: Profile): Profile {
+  return { plugins: p.plugins, skills: p.skills.filter(s => !p.plugins.includes(s.split(':')[0])) }
+}
+
+// The ledger of skills that actually ran, by the name the engine reported. `since` dates it.
+export type Usage = Record<string, { n: number; last: number }>
+export type Ledger = { since: number; uses: Usage }
+
+export const bump = (u: Usage, skill: string, now: number): Usage => ({ ...u, [skill]: { n: (u[skill]?.n ?? 0) + 1, last: now } })
+
+// A plugin pick counts every skill under it; a skill pick counts its own name, bare or `plugin:skill`.
+export function uses(u: Usage, pick: string, isPlugin: boolean): number {
+  const tail = pick.split(':').pop()
+  return Object.entries(u).reduce((t, [k, v]) => t + (k === pick || (isPlugin ? k.startsWith(`${pick}:`) : k.split(':').pop() === tail) ? v.n : 0), 0)
+}
+
+/** The picks that never ran, with a starred plugin's covered skills left out as `effective` does. */
+export function unused(p: Profile, u: Usage): Profile {
+  const e = effective(p)
+  return { plugins: e.plugins.filter(n => uses(u, n, true) === 0), skills: e.skills.filter(s => uses(u, s, false) === 0) }
+}
+
+async function readLedger($: any): Promise<Ledger> {
+  const l = (await $.store.get('usage').catch(() => undefined)) as Ledger | undefined
+  return l && typeof l.since === 'number' && l.uses ? l : { since: 0, uses: {} }
+}
+
+async function record($: any, skill: string) {
+  const l = await readLedger($)
+  const now = await $.clock.now()
+  await $.store.set('usage', { since: l.since || now, uses: bump(l.uses, skill, now) })
+}
+
+/** The line added to every request, or null when nothing is picked. Advise leaves the choice to the model; gate asks for a skill every turn. */
+export function reminder(p: Profile, mode: Mode): string | null {
+  const { skills, plugins } = effective(p)
+  if (skills.length === 0 && plugins.length === 0) return null
+  if (mode === 'advise') {
+    const list = [...skills, ...plugins.map(n => `any ${n} skill`)].join(', ')
+    return `The person favors these skills: ${list}. For each request, check whether one clearly fits and invoke it with the Skill tool only if it does. If none fits, or the request is a question or a small edit, go without one. Never invoke a skill just to satisfy this note.`
+  }
+  const parts = []
+  if (skills.length > 0) parts.push(`The person chose these skills for this session: ${skills.join(', ')}. Invoke the relevant one with the Skill tool before you change code or run commands, every turn, without being asked.`)
+  if (plugins.length > 0) parts.push(`The person chose these plugins to always prefer: ${plugins.join(', ')}. When one of their skills fits the task, invoke it with the Skill tool.`)
+  return parts.join(' ')
+}
+
 const plugins = atom({ plugin: 'skill-gate', key: 'plugins' } as const, [], { shape: 'plugins-1' })
 const blocked = atom({ plugin: 'skill-gate', key: 'blocked' } as const, null, { shape: 'blocked-1' })
 const frame = atom({ plugin: 'skill-gate', key: 'frame' } as const, REST, { shape: 'frame-1' })
@@ -30,6 +80,7 @@ const newName = atom({ plugin: 'skill-gate', key: 'newName' } as const, '', { sh
 const query = atom({ plugin: 'skill-gate', key: 'query' } as const, '', { shape: 'query-1' })
 const tabAtom = atom({ plugin: 'skill-gate', key: 'tab' } as const, 'plugins', { shape: 'tab-1' })
 const session = atom({ plugin: 'skill-gate', key: 'session' } as const, false, { shape: 'session-1' })
+const modeAtom = atom({ plugin: 'skill-gate', key: 'mode' } as const, 'advise', { shape: 'mode-1' })
 
 let stop: (() => void) | undefined
 
@@ -92,7 +143,13 @@ async function saveProfiles($: any) {
   await $.store.set('profiles', { profiles: await read($, profiles), active: await read($, active) })
 }
 
+async function setMode($: any, m: Mode) {
+  await update($, modeAtom, () => m)
+  await $.store.set('mode', m)
+}
+
 async function loadProfiles($: any) {
+  if ((await $.store.get('mode').catch(() => undefined)) === 'gate') await update($, modeAtom, () => 'gate')
   const saved = (await $.store.get('profiles').catch(() => undefined)) as
     | { profiles: Record<string, Profile>; active: string }
     | undefined
@@ -178,12 +235,9 @@ export const register: Register = on => {
   // Tell the model about the active profile's skills and plugins in every request of the session.
   on('prompt.compose', async ($, e, next) => {
     const r = await next(e)
-    const p = await current($)
-    if (p.skills.length === 0 && p.plugins.length === 0) return r
-    const parts = []
-    if (p.skills.length > 0) parts.push(`The person chose these skills for this session: ${p.skills.join(', ')}. Invoke the relevant one with the Skill tool before you change code or run commands, every turn, without being asked.`)
-    if (p.plugins.length > 0) parts.push(`The person chose these plugins to always prefer: ${p.plugins.join(', ')}. When one of their skills fits the task, invoke it with the Skill tool.`)
-    return { sections: [...r.sections, { id: 'skill-gate:picked', text: parts.join(' '), scope: 'session' as const }] }
+    const text = reminder(await current($), await read($, modeAtom))
+    if (text === null) return r
+    return { sections: [...r.sections, { id: 'skill-gate:picked', text, scope: 'session' as const }] }
   }).catch(($, e, next) => next(e))
 
   on('turn.start', ($, e, next) => {
@@ -200,14 +254,16 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
-  on('skill.prompt', ($, e, next) => {
+  on('skill.prompt', async ($, e, next) => {
     isAllowed = true
+    await record($, e.skill)
     return next(e)
-  })
+  }).catch(($, e, next) => next(e)) // a ledger failure must not stop the skill
 
   on('tool.call', async ($, e, next) => {
     if (e.tool === 'Skill') isAllowed = true
-    if (isAllowed || isSession || !GATED.has(e.tool)) return next(e)
+    // Advise mode never holds a call: the reminder informs the model and it decides.
+    if (isAllowed || isSession || !GATED.has(e.tool) || (await read($, modeAtom)) === 'advise') return next(e)
     if (e.tool === 'Bash' && SAFE.test(String((e as any).command ?? ''))) return next(e)
 
     // Picked skills mean approval is implied: tell the model which to use and let it retry.
@@ -255,7 +311,12 @@ export const register: Register = on => {
     const q = await read($, query)
     const tab = await read($, tabAtom)
     const prof = profs[act] ?? EMPTY
-    const picks = prof.skills.length + prof.plugins.length
+    const mode = await read($, modeAtom)
+    const ledger = await readLedger($)
+    const dead = unused(prof, ledger.uses)
+    const deadCount = dead.plugins.length + dead.skills.length
+    const eff = effective(prof)
+    const picks = eff.skills.length + eff.plugins.length
     const isMoving = f < REST
     const onCount = rows.filter(r => r.isOn).length
     // The border blinks yellow twice when a call is blocked, then stays steady.
@@ -280,12 +341,14 @@ export const register: Register = on => {
     }
     const groupList = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
 
-    const gate = isSess
+    const gate = mode === 'advise'
+      ? { color: 'cyan', text: picks > 0 ? `advising: ${act} is a hint, I use a skill only when one fits` : 'advising: nothing picked' }
+      : isSess
       ? { color: 'green', text: 'gate open for this session' }
       : picks > 0
         ? { color: 'cyan', text: `gate on: needs a skill, reminds me of ${act}` }
         : { color: 'yellow', text: 'gate on: asks you before code changes' }
-    const preview = [...prof.plugins.map(p => `★ ${p}`), ...prof.skills.map(s => `✓ ${s}`)]
+    const preview = [...eff.plugins.map(p => `★ ${p} ·${uses(ledger.uses, p, true)}`), ...eff.skills.map(s => `✓ ${s} ·${uses(ledger.uses, s, false)}`)]
 
     return (
       <Box flexDirection="column" gap={1} paddingX={2} paddingY={1}>
@@ -297,6 +360,11 @@ export const register: Register = on => {
             <Text bold>Skill gate</Text>
           </Box>
           <Text color={gate.color}>● {gate.text}</Text>
+          <Box>
+            <Button key="mode" onPress={() => setMode($, mode === 'advise' ? 'gate' : 'advise')}>
+              {mode === 'advise' ? 'Mode: advise · click to require a skill' : 'Mode: gate · click to only advise'}
+            </Button>
+          </Box>
         </Box>
 
         {last !== null && (
@@ -383,6 +451,21 @@ export const register: Register = on => {
               {preview.length > 4 ? `  +${preview.length - 4} more` : ''}
             </Text>
           )}
+          {ledger.since > 0 && deadCount > 0 && (
+            <Box gap={1} flexDirection="column">
+              <Text color="yellow">
+                Never ran since {new Date(ledger.since).toLocaleDateString()}: {[...dead.plugins, ...dead.skills].join(', ')}. Each rides in every request.
+              </Text>
+              <Box>
+                <Button
+                  key="drop-unused"
+                  onPress={() => edit($, p => ({ plugins: p.plugins.filter(x => !dead.plugins.includes(x)), skills: p.skills.filter(x => !dead.skills.includes(x)) }))}
+                >
+                  Drop {deadCount} unused
+                </Button>
+              </Box>
+            </Box>
+          )}
           {picks > SOFT_CAP && (
             <Text color="yellow">
               {picks} picks: every request now carries a longer reminder. Fewer is cheaper.
@@ -447,7 +530,7 @@ export const register: Register = on => {
                   <Button key="head" onPress={() => toggleGroup(g)}>
                     <Text bold>{isOpen ? '▾' : '▸'} {g}</Text>
                     <Text dimColor> {list.length}</Text>
-                    {picked > 0 && <Text color="cyan"> · {picked} picked</Text>}
+                    {prof.plugins.includes(g) ? <Text color="cyan"> · ★ covers all</Text> : picked > 0 && <Text color="cyan"> · {picked} picked</Text>}
                   </Button>
                   {isOpen &&
                     list.map(s => {

@@ -2,11 +2,22 @@
 
 A Claude Code mod that holds code-changing tool calls in a turn where no skill was used until you approve them, lets you save named profiles of skills and plugins the model should always prefer, and gives you a pane to switch installed plugins on or off. The plugin itself is called `skill-gate`; `skillz-please` is the repository and marketplace name.
 
-The idea: if a turn is about to edit files or run commands without going through any skill, stop and make that a visible, deliberate choice. It adds friction and a plugin switchboard.
+## Two modes
+
+- **Advise (the default).** Nothing is ever held. The reminder on every request lists what you picked and tells the model to use one **only if it clearly fits** the request, and never just to satisfy the note. The model reads your picks and decides each turn; a question or a small edit goes without a skill.
+- **Gate.** The original behavior below: a code-changing call in a turn with no skill is held or refused until a skill is used or you allow it. Switch with the **Mode** button at the top of the pane; the choice is saved.
+
+A starred plugin (★) already covers all of its skills, so skills you also picked inside it are dropped from the reminder and the pane shows "★ covers all" on that group. Pick a plugin to say "anything from here", or single skills to say "only these", not both.
+
+## The ledger
+
+Every time a skill actually runs (the Skill tool, or `/name`), the mod counts it. The Profile card shows each pick with its count (`★ caveman ·12`), and a pick that has **never run** since the ledger began is listed in yellow with a **Drop N unused** button. Each pick rides in every request, so dropping dead ones is the one thing here that lowers cost. A plugin star counts every skill under that plugin. Counts are kept across sessions, for all profiles together, and start the first time a skill runs after updating.
+
+The rest of this page describes the gate mode.
 
 ## Read this first: it does not save tokens
 
-The gate does not reduce token use, and in practice it usually increases it.
+The gate does not reduce token use, and in practice it usually increases it. Advise mode costs only the reminder line.
 
 - Each refusal adds the denial message to the conversation, and the model then retries.
 - The model is nudged toward invoking a skill, and invoking one loads that skill's full instructions into context. That can be thousands of tokens, and the model may load one only to get past the gate.

@@ -12,6 +12,7 @@ declare module 'claude-code' {
       frame: Shaped<number>
       flip: Shaped<Flip | null>
       session: Shaped<boolean>
+      mode: Shaped<string>
       skills: Shaped<string[]>
       profiles: Shaped<Record<string, Profile>>
       active: Shaped<string>

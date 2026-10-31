@@ -11,7 +11,10 @@ The gate does not save tokens and usually costs some.
 
 ## Picking skills and plugins
 
-- **It asks; it does not force.** The reminder steers the model. It does not invoke a skill for it, and the model decides which picked skill is relevant.
+- **It asks; it does not force.** The reminder steers the model. It does not invoke a skill for it, and the model decides which picked skill is relevant. In advise mode (the default) that is the whole mechanism: nothing is held, so a model that ignores the reminder is not stopped. Only gate mode enforces anything, and its check is the weak one below.
+- **Advise wording is a request, not a guarantee.** Models can still skip a fitting skill or call an unneeded one; there is no test with a live model, only tests of the reminder text.
+- **The ledger is a name match.** It counts the name the engine reports for a skill; a bare name matches `plugin:name` by its last part, so two skills sharing a name share a count. A pick added today shows "never ran" until it runs, so read the date before pressing **Drop unused**. The ledger is one global count, not per profile or per project, and a skill run by a subagent counts only if the engine fires `skill.prompt` there (not checked).
+- **A plugin star and a skill pick in the same plugin overlap.** The reminder keeps the star and drops the skill; the skill pick stays saved, so unstarring the plugin brings it back.
 - **The gate checks for any skill**, not specifically a picked one.
 - **A starred plugin only helps if it has skills.** A plugin with only hooks, commands or agents gives the model nothing to invoke. Star state is not cleared when you switch the plugin off.
 - **The skill list hides only `built-in` skills.** Some bundled skills may still appear. It cannot tell skills you added by hand from other non-built-in ones.
@@ -56,4 +59,4 @@ The gate does not save tokens and usually costs some.
 
 ## Not included
 
-- Tests. Validation with `claude plugin validate` passed; there is no `*.test.ts`.
+- Tests of the hooks and the pane. `tests/reminder.test.ts` covers only the reminder text, the plugin-over-skill rule and the ledger counting (4 tests); the store read and write and the yellow "never ran" card were not run live. The advise-mode pass-through in `tool.call`, the Mode button and its saving were checked by reading and by `claude plugin validate`, not run in a live session.

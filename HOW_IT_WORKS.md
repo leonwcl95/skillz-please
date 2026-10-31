@@ -7,11 +7,13 @@ Everything lives in `hooks/register.tsx`. It is a hooks module: it registers han
 | Event | What the mod does |
 | --- | --- |
 | `turn.start` | Resets the "skill used" flag, for the main conversation only (subagent turns do not reset it). |
-| `skill.prompt` | Sets the flag. Fires when a skill's prompt is expanded: `/name`, the Skill tool, or a preload. |
+| `skill.prompt` | Sets the flag and adds one to that skill's count in the ledger (`usage` in the mod's store: `{ since, uses }`). Fires when a skill's prompt is expanded: `/name`, the Skill tool, or a preload. A failed ledger write passes the skill through. |
 | `tool.call` | If the tool is `Skill`, sets the flag. Otherwise, if the tool is one of `Edit`, `Write`, `NotebookEdit`, `Bash` and neither the turn flag nor the session allowance is set: a single read-only Bash command (matched by a regex: `ls`, `pwd`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`, `git status|log|diff|show|branch`; no `;`, `|`, `&`, `>`, `<`, backticks, `$`, parentheses or `--output`) passes; with skills or plugins picked, returns a denial naming them; with none picked, records the tool name, opens the pane, shows a toast and holds the call for up to 2 minutes, then denies it. Every other tool passes through untouched. |
 | `session.start` | Loads the saved profiles and the active one from the mod's store, and registers `/skill-gate`. |
 | `turn.complete` | Refreshes the skill list from the exact `/context` data. |
-| `prompt.compose` | When the active profile has skills or plugins, adds one `session` section to the system prompt asking the model to invoke the picked skills, and to prefer the picked plugins' skills. Adds nothing when nothing is picked. |
+| `prompt.compose` | When the active profile has skills or plugins, adds one `session` section to the system prompt. Advise mode (default): "use one only if it clearly fits, never just to satisfy this note". Gate mode: "invoke the relevant one every turn". Skills inside a starred plugin are left out of the text. Adds nothing when nothing is picked. |
+
+The mode (`advise` or `gate`) is saved in the mod's store. In advise mode the `tool.call` hook passes every call through before any gate logic runs.
 
 With nothing picked, the call is held (the hook waits) until you press a pane button: **Allow this turn** or **Allow for this session** lets it run; **Deny** returns a denial to the model, which may retry, costing tokens; see [LIMITATIONS.md](LIMITATIONS.md). A new turn starting while a call is held denies it.
 
