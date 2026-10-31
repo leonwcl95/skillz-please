@@ -342,13 +342,22 @@ export const register: Register = on => {
     const groupList = [...groups.entries()].sort(([a], [b]) => a.localeCompare(b))
 
     const gate = mode === 'advise'
-      ? { color: 'cyan', text: picks > 0 ? `advising: ${act} is a hint, I use a skill only when one fits` : 'advising: nothing picked' }
+      ? { color: 'cyan', text: picks > 0 ? `Claude knows your favorites (${act}) and uses one only when it helps.` : 'No favorites picked yet. Claude uses skills on its own.' }
       : isSess
-      ? { color: 'green', text: 'gate open for this session' }
+      ? { color: 'green', text: 'The gate is off for this session: Claude can edit freely.' }
       : picks > 0
-        ? { color: 'cyan', text: `gate on: needs a skill, reminds me of ${act}` }
-        : { color: 'yellow', text: 'gate on: asks you before code changes' }
-    const preview = [...eff.plugins.map(p => `★ ${p} ·${uses(ledger.uses, p, true)}`), ...eff.skills.map(s => `✓ ${s} ·${uses(ledger.uses, s, false)}`)]
+        ? { color: 'cyan', text: `Claude must use a skill before it edits or runs anything. Your favorites (${act}) are suggested.` }
+        : { color: 'yellow', text: 'Claude must use a skill before it edits or runs anything, or you approve it here.' }
+    // One card shape for the whole pane: 2 columns and 1 row inside the border, 1 row between children.
+    const card = { borderStyle: 'round', paddingX: 2, paddingY: 1, gap: 1, flexDirection: 'column' } as const
+    // Preferred first, then switched on, then by name, so what matters is in the first rows, not behind "+N more".
+    const rank = (r: PluginRow) => (prof.plugins.includes(r.id.split('@')[0]) ? 0 : 2) + (r.isOn ? 0 : 1)
+    const ordered = [...plugRows].sort((a, b) => rank(a) - rank(b) || a.id.localeCompare(b.id))
+    const chips = [
+      ...eff.plugins.map(p => ({ key: `p-${p}`, mark: '◆', text: p, n: uses(ledger.uses, p, true), color: 'cyan' })),
+      ...eff.skills.map(s => ({ key: `s-${s}`, mark: '✓', text: s, n: uses(ledger.uses, s, false), color: undefined })),
+    ]
+    const runs = (n: number) => (n === 0 ? 'never ran' : `${n} run${n === 1 ? '' : 's'}`)
 
     return (
       <Box flexDirection="column" gap={1} paddingX={2} paddingY={1}>
@@ -360,75 +369,85 @@ export const register: Register = on => {
             <Text bold>Skill gate</Text>
           </Box>
           <Text color={gate.color}>● {gate.text}</Text>
-          <Box>
-            <Button key="mode" onPress={() => setMode($, mode === 'advise' ? 'gate' : 'advise')}>
-              {mode === 'advise' ? 'Mode: advise · click to require a skill' : 'Mode: gate · click to only advise'}
-            </Button>
-          </Box>
+        </Box>
+
+        <Box gap={1} alignItems="center">
+          <Text dimColor>Rule</Text>
+          <Button key="m-advise" variant={mode === 'advise' ? 'primary' : undefined} onPress={() => setMode($, 'advise')}>
+            Free choice
+          </Button>
+          <Button key="m-gate" variant={mode === 'gate' ? 'primary' : undefined} onPress={() => setMode($, 'gate')}>
+            Skill required
+          </Button>
+          <Text dimColor>{mode === 'advise' ? 'Claude picks a skill only if it helps' : 'nothing runs until a skill is used'}</Text>
         </Box>
 
         {last !== null && (
-          <Box borderStyle="round" borderColor={warn} paddingX={2} paddingY={1} gap={1} flexDirection="column">
+          <Box {...card} borderColor={warn}>
             <Text color="yellow" bold>
               Paused · {last}
             </Text>
             <Text dimColor>No skill was used this turn. The turn is waiting for you.</Text>
-            <Button
-              key="allow"
-              variant="primary"
-              onPress={async () => {
-                isAllowed = true
-                await update($, blocked, () => null)
-                release('allow')
-              }}
-            >
-              Allow this turn
-            </Button>
-            <Button
-              key="session"
-              onPress={async () => {
-                isSession = true
-                await update($, session, () => true)
-                await update($, blocked, () => null)
-                release('allow')
-              }}
-            >
-              Allow for this session
-            </Button>
-            <Button
-              key="deny"
-              onPress={async () => {
-                await update($, blocked, () => null)
-                release('deny')
-              }}
-            >
-              Deny
-            </Button>
+            <Box gap={1}>
+              <Button
+                key="allow"
+                variant="primary"
+                onPress={async () => {
+                  isAllowed = true
+                  await update($, blocked, () => null)
+                  release('allow')
+                }}
+              >
+                Allow this turn
+              </Button>
+              <Button
+                key="session"
+                onPress={async () => {
+                  isSession = true
+                  await update($, session, () => true)
+                  await update($, blocked, () => null)
+                  release('allow')
+                }}
+              >
+                Allow for this session
+              </Button>
+              <Button
+                key="deny"
+                onPress={async () => {
+                  await update($, blocked, () => null)
+                  release('deny')
+                }}
+              >
+                Deny
+              </Button>
+            </Box>
           </Box>
         )}
 
         {isSess && (
-          <Button
-            key="revoke"
-            onPress={async () => {
-              isSession = false
-              await update($, session, () => false)
-            }}
-          >
-            Turn the gate back on
-          </Button>
+          <Box>
+            <Button
+              key="revoke"
+              onPress={async () => {
+                isSession = false
+                await update($, session, () => false)
+              }}
+            >
+              Turn the gate back on
+            </Button>
+          </Box>
         )}
 
-        <Box borderStyle="round" borderColor="cyan" paddingX={2} paddingY={1} gap={1} flexDirection="column">
+        <Box {...card} borderColor="cyan">
           <Text bold>Profile</Text>
-          <Box gap={1}>
+          <Box gap={1} flexWrap="wrap">
             {Object.keys(profs).map(n => (
               <Button key={`p-${n}`} variant={n === act ? 'primary' : undefined} onPress={() => switchTo($, n)}>
                 {n}
               </Button>
             ))}
           </Box>
-          <Box>
+          <Box gap={1}>
             <Input
               key="new"
               label="New profile "
@@ -444,12 +463,16 @@ export const register: Register = on => {
             )}
           </Box>
           {picks === 0 ? (
-            <Text dimColor>Nothing picked. Open the Skills tab to tick skills, star plugins on the Plugins tab.</Text>
+            <Text dimColor>Nothing picked. Prefer a plugin (◆) on the Plugins tab, or pick skills on the Skills tab.</Text>
           ) : (
-            <Text>
-              {preview.slice(0, 4).join('  ')}
-              {preview.length > 4 ? `  +${preview.length - 4} more` : ''}
-            </Text>
+            <Box gap={1} flexWrap="wrap">
+              {chips.slice(0, 8).map(c => (
+                <Text key={c.key} color={c.color}>
+                  {c.mark} {c.text} <Text dimColor>{c.n}</Text>
+                </Text>
+              ))}
+              {chips.length > 8 && <Text dimColor>+{chips.length - 8} more</Text>}
+            </Box>
           )}
           {ledger.since > 0 && deadCount > 0 && (
             <Box gap={1} flexDirection="column">
@@ -473,8 +496,8 @@ export const register: Register = on => {
           )}
         </Box>
 
-        <Box borderStyle="round" borderColor="magenta" paddingX={2} paddingY={1} gap={1} flexDirection="column">
-          <Box gap={2}>
+        <Box {...card} borderColor="magenta">
+          <Box gap={1}>
             <Button key="t-plugins" variant={tab === 'plugins' ? 'primary' : undefined} onPress={() => pickTab('plugins')}>
               Plugins {onCount} on · {rows.length - onCount} off
             </Button>
@@ -492,60 +515,69 @@ export const register: Register = on => {
           />
 
           {tab === 'plugins' && (
-            <Box flexDirection="column" gap={1}>
-            {plugRows.slice(0, MAX).map(r => {
-              const [pname, market] = r.id.split('@')
-              const isFlipping = fl?.id === r.id && f < TO_ON.length
-              const glyph = isFlipping ? (fl.to ? TO_ON : TO_OFF)[f] : r.isOn ? '●' : '○'
-              const isFav = prof.plugins.includes(pname)
-              return (
-                <Box key={r.id}>
-                  <Button key="fav" onPress={() => togglePlugin(pname)}>
-                    <Text color={isFav ? 'cyan' : undefined} dimColor={!isFav}>
-                      {isFav ? '★' : '☆'}{' '}
-                    </Text>
-                  </Button>
-                  <Button key="on" onPress={() => toggle($, r.id)}>
-                    <Text color={r.isOn ? 'green' : 'red'} bold>
-                      {glyph} {r.isOn ? 'ON ' : 'OFF'}{' '}
-                    </Text>
-                    <Text bold={r.isOn} dimColor={!r.isOn}>
-                      {pname}
-                    </Text>
-                    {market !== undefined && pname !== market && <Text dimColor> {market}</Text>}
-                  </Button>
-                </Box>
-              )
-            })}
+            <Box flexDirection="column">
+              {ordered.slice(0, MAX).map(r => {
+                const [pname, market] = r.id.split('@')
+                const isFlipping = fl?.id === r.id && f < TO_ON.length
+                const glyph = isFlipping ? (fl.to ? TO_ON : TO_OFF)[f] : r.isOn ? '●' : '○'
+                const isFav = prof.plugins.includes(pname)
+                const n = uses(ledger.uses, pname, true)
+                return (
+                  <Box key={r.id} gap={1}>
+                    <Button key="fav" onPress={() => togglePlugin(pname)}>
+                      <Text color={isFav ? 'cyan' : undefined} dimColor={!isFav}>
+                        {isFav ? '◆' : '◇'}
+                      </Text>
+                    </Button>
+                    <Box width={30}>
+                      <Button key="on" onPress={() => toggle($, r.id)}>
+                        <Text color={r.isOn ? 'green' : 'red'} bold>
+                          {glyph} {r.isOn ? 'ON ' : 'OFF'}{' '}
+                        </Text>
+                        <Text bold={r.isOn} dimColor={!r.isOn}>
+                          {pname}
+                        </Text>
+                        {market !== undefined && pname !== market && <Text dimColor> {market}</Text>}
+                      </Button>
+                    </Box>
+                    <Text dimColor>{n > 0 ? runs(n) : ''}</Text>
+                  </Box>
+                )
+              })}
             </Box>
           )}
 
           {tab === 'skills' && (
             <Box flexDirection="column" gap={1}>
-            {groupList.map(([g, list]) => {
-              const isOpen = needle !== '' || open.includes(g)
-              const picked = list.filter(s => prof.skills.includes(s)).length
-              return (
-                <Box key={g} flexDirection="column">
-                  <Button key="head" onPress={() => toggleGroup(g)}>
-                    <Text bold>{isOpen ? '▾' : '▸'} {g}</Text>
-                    <Text dimColor> {list.length}</Text>
-                    {prof.plugins.includes(g) ? <Text color="cyan"> · ★ covers all</Text> : picked > 0 && <Text color="cyan"> · {picked} picked</Text>}
-                  </Button>
-                  {isOpen &&
-                    list.map(s => {
-                      const isPicked = prof.skills.includes(s)
-                      return (
-                        <Button key={s} onPress={() => toggleSkill(s)}>
-                          <Text color={isPicked ? 'cyan' : undefined} dimColor={!isPicked}>
-                            {'   '}{isPicked ? '✓' : '·'} {s.includes(':') ? s.slice(s.indexOf(':') + 1) : s}
-                          </Text>
-                        </Button>
-                      )
-                    })}
-                </Box>
-              )
-            })}
+              {groupList.map(([g, list]) => {
+                const isOpen = needle !== '' || open.includes(g)
+                const picked = list.filter(s => prof.skills.includes(s)).length
+                return (
+                  <Box key={g} flexDirection="column">
+                    <Button key="head" onPress={() => toggleGroup(g)}>
+                      <Text bold>{isOpen ? '▾' : '▸'} {g}</Text>
+                      <Text dimColor> {list.length}</Text>
+                      {prof.plugins.includes(g) ? <Text color="cyan"> · ◆ covers all</Text> : picked > 0 && <Text color="cyan"> · {picked} picked</Text>}
+                    </Button>
+                    {isOpen && (
+                      <Box flexDirection="column" paddingLeft={2}>
+                        {list.map(s => {
+                          const isPicked = prof.skills.includes(s)
+                          const n = uses(ledger.uses, s, false)
+                          return (
+                            <Button key={s} onPress={() => toggleSkill(s)}>
+                              <Text color={isPicked ? 'cyan' : undefined} dimColor={!isPicked}>
+                                {isPicked ? '✓' : '·'} {s.includes(':') ? s.slice(s.indexOf(':') + 1) : s}
+                              </Text>
+                              {n > 0 && <Text dimColor> {runs(n)}</Text>}
+                            </Button>
+                          )
+                        })}
+                      </Box>
+                    )}
+                  </Box>
+                )
+              })}
             </Box>
           )}
 
@@ -555,7 +587,7 @@ export const register: Register = on => {
 
         <Text dimColor>
           {tab === 'plugins'
-            ? '★ always prefer · click ON/OFF to switch (applies after /reload-plugins)'
+            ? '◆ preferred · click ON/OFF to switch (applies after /reload-plugins)'
             : '▸ open a plugin, click a skill to pick · unpicked skills stay automatic'}
         </Text>
       </Box>
